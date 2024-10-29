@@ -1,4 +1,3 @@
-// Main class to launch the application
 import java.awt.*;
 import java.time.*;
 import java.time.format.*;
@@ -15,10 +14,14 @@ class MetroBookingGUI extends JFrame {
     private JSpinner timeSpinner;
     private JTextArea resultArea;
     private List<TrainSchedule> schedules;
-    private JPanel routesPanel;
-    private ButtonGroup routeButtonGroup;
-    private JButton confirmButton;
-    private List<List<TrainSchedule>> currentRoutes;
+    private JPanel selectionPanel;
+    private JButton nextButton;
+    private JButton startOverButton;
+
+    private List<Station> shortestPath;
+    private int currentSegmentIndex = 0;
+    private List<TrainSchedule> selectedTrains = new ArrayList<>();
+    private LocalTime currentTime;
 
     public MetroBookingGUI() {
         initializeStations();
@@ -76,19 +79,28 @@ class MetroBookingGUI extends JFrame {
         inputPanel.add(new JLabel("Departure Time:"));
         inputPanel.add(timeSpinner);
     
-        JButton searchButton = new JButton("Search Trains");
-        searchButton.addActionListener(e -> searchTrains());
+        JButton searchButton = new JButton("Start Journey Planning");
+        searchButton.addActionListener(e -> startJourneyPlanning());
         inputPanel.add(new JPanel()); // Empty panel for grid alignment
         inputPanel.add(searchButton);
     
-        // Create routes panel for radio buttons and route details
-        routesPanel = new JPanel();
-        routesPanel.setBorder(BorderFactory.createTitledBorder("Available Routes"));
+        // Create selection panel for train options
+        selectionPanel = new JPanel();
+        selectionPanel.setLayout(new BoxLayout(selectionPanel, BoxLayout.Y_AXIS));
+        selectionPanel.setBorder(BorderFactory.createTitledBorder("Available Trains"));
     
-        // Create confirm button
-        confirmButton = new JButton("Confirm Booking");
-        confirmButton.addActionListener(e -> confirmBooking());
-        confirmButton.setEnabled(false);
+        // Create buttons panel
+        JPanel buttonsPanel = new JPanel(new FlowLayout());
+        nextButton = new JButton("Select Train");
+        nextButton.addActionListener(e -> selectTrainAndContinue());
+        nextButton.setEnabled(false);
+        
+        startOverButton = new JButton("Start Over");
+        startOverButton.addActionListener(e -> resetBooking());
+        startOverButton.setEnabled(false);
+        
+        buttonsPanel.add(nextButton);
+        buttonsPanel.add(startOverButton);
     
         // Create result area
         resultArea = new JTextArea(10, 40);
@@ -103,11 +115,11 @@ class MetroBookingGUI extends JFrame {
         mainPanel.add(inputPanel, BorderLayout.NORTH);
         
         JPanel centerPanel = new JPanel(new BorderLayout());
-        centerPanel.add(new JScrollPane(routesPanel), BorderLayout.CENTER);
+        centerPanel.add(new JScrollPane(selectionPanel), BorderLayout.CENTER);
         centerPanel.add(scrollPane, BorderLayout.SOUTH);
         mainPanel.add(centerPanel, BorderLayout.CENTER);
         
-        mainPanel.add(confirmButton, BorderLayout.SOUTH);
+        mainPanel.add(buttonsPanel, BorderLayout.SOUTH);
     
         add(mainPanel);
     
@@ -115,17 +127,15 @@ class MetroBookingGUI extends JFrame {
         timeSpinner.setValue(new Date());
         
         // Set frame properties
-        setSize(600, 800);
+        setSize(800, 600);
         setLocationRelativeTo(null);
-        setVisible(true);
     }
-    
+
     private void generateSchedules() {
         schedules = new ArrayList<>();
         LocalTime startTime = LocalTime.of(6, 0);
-        LocalTime endTime = LocalTime.of(20, 0);
+        LocalTime endTime = LocalTime.of(23, 0);
 
-        // Generate schedules for each connection
         for (Station from : stations.values()) {
             for (Map.Entry<Station, Integer> connection : from.connections.entrySet()) {
                 Station to = connection.getKey();
@@ -133,46 +143,41 @@ class MetroBookingGUI extends JFrame {
                 
                 LocalTime currentTime = startTime;
                 while (currentTime.isBefore(endTime)) {
-                    // Calculate travel time based on 30 km/h speed
-                    int travelMinutes = (distance * 60) / 30;
+                    int travelMinutes = (distance * 60) / 30; // 30 km/h speed
                     LocalTime arrivalTime = currentTime.plusMinutes(travelMinutes);
                     
                     schedules.add(new TrainSchedule(currentTime, arrivalTime, from, to));
-                    
-                    // Next train after 10 minutes
-                    currentTime = currentTime.plusMinutes(10);
+                    currentTime = currentTime.plusMinutes(30); // Train every 30 minutes
                 }
             }
         }
     }
 
-    private void searchTrains() {
+    private void startJourneyPlanning() {
         String from = (String) fromStation.getSelectedItem();
         String to = (String) toStation.getSelectedItem();
         Date time = (Date) timeSpinner.getValue();
-        LocalDateTime searchDateTime = LocalDateTime.ofInstant(time.toInstant(), ZoneId.systemDefault());
-        LocalTime searchTime = searchDateTime.toLocalTime();
+        currentTime = LocalDateTime.ofInstant(time.toInstant(), ZoneId.systemDefault()).toLocalTime();
 
-        // Find shortest path using Dijkstra's algorithm
-        Map<Station, Integer> shortestDistances = findShortestPath(stations.get(from), stations.get(to));
+        // Find shortest path
+        shortestPath = findShortestPath(stations.get(from), stations.get(to));
         
-        if (shortestDistances == null) {
-            resultArea.setText("No route available between selected stations.");
+        if (shortestPath == null || shortestPath.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No route available between selected stations.");
             return;
         }
 
-        // Find available trains
-        List<List<TrainSchedule>> possibleRoutes = findTrainRoutes(
-            stations.get(from), 
-            stations.get(to), 
-            searchTime, 
-            shortestDistances
-        );
-
-        displayRoutes(possibleRoutes);
+        // Reset for new journey
+        currentSegmentIndex = 0;
+        selectedTrains.clear();
+        startOverButton.setEnabled(true);
+        
+        // Show first segment options
+        showTrainOptions();
     }
 
-    private Map<Station, Integer> findShortestPath(Station start, Station end) {
+    private List<Station> findShortestPath(Station start, Station end) {
+        Map<Station, Station> previousStation = new HashMap<>();
         Map<Station, Integer> distances = new HashMap<>();
         PriorityQueue<Station> queue = new PriorityQueue<>(
             Comparator.comparingInt(s -> distances.getOrDefault(s, Integer.MAX_VALUE))
@@ -185,7 +190,14 @@ class MetroBookingGUI extends JFrame {
             Station current = queue.poll();
             
             if (current == end) {
-                return distances;
+                // Reconstruct path
+                List<Station> path = new ArrayList<>();
+                Station station = end;
+                while (station != null) {
+                    path.add(0, station);
+                    station = previousStation.get(station);
+                }
+                return path;
             }
 
             for (Map.Entry<Station, Integer> neighbor : current.connections.entrySet()) {
@@ -194,6 +206,7 @@ class MetroBookingGUI extends JFrame {
                 
                 if (newDist < distances.getOrDefault(next, Integer.MAX_VALUE)) {
                     distances.put(next, newDist);
+                    previousStation.put(next, current);
                     queue.offer(next);
                 }
             }
@@ -202,195 +215,166 @@ class MetroBookingGUI extends JFrame {
         return null;
     }
 
-    private List<List<TrainSchedule>> findTrainRoutes(
-    Station start, 
-    Station end, 
-    LocalTime searchTime,
-    Map<Station, Integer> shortestDistances
-) {
-    List<List<TrainSchedule>> routes = new ArrayList<>();
-    
-    // Find trains 10 minutes before and after the intended time
-    LocalTime searchStartTime = searchTime.minusMinutes(10);
-    LocalTime searchEndTime = searchTime.plusMinutes(10);
-    
-    // Find direct trains first
-    List<TrainSchedule> directTrains = schedules.stream()
-        .filter(s -> s.from == start && s.to == end)
-        .filter(s -> !s.departureTime.isBefore(searchStartTime))
-        .filter(s -> s.departureTime.isBefore(searchEndTime.plusHours(1)))
-        .sorted(Comparator.comparing(s -> s.departureTime))
-        .collect(Collectors.toList());
-
-    if (!directTrains.isEmpty()) {
-        for (TrainSchedule train : directTrains) {
-            routes.add(Arrays.asList(train));
+    private void showTrainOptions() {
+        if (currentSegmentIndex >= shortestPath.size() - 1) {
+            showFinalItinerary();
+            return;
         }
+
+        Station from = shortestPath.get(currentSegmentIndex);
+        Station to = shortestPath.get(currentSegmentIndex + 1);
+        
+        LocalTime searchTime = currentSegmentIndex == 0 ? currentTime :
+            selectedTrains.get(selectedTrains.size() - 1).arrivalTime;
+
+        List<TrainSchedule> availableTrains = findAvailableTrains(from, to, searchTime);
+        displayTrainOptions(availableTrains);
     }
 
-    // Find connecting trains with minimum 5-minute buffer
-    for (Station intermediate : stations.values()) {
-        if (intermediate != start && intermediate != end) {
-            List<TrainSchedule> firstLeg = schedules.stream()
-                .filter(s -> s.from == start && s.to == intermediate)
-                .filter(s -> !s.departureTime.isBefore(searchStartTime))
-                .filter(s -> s.departureTime.isBefore(searchEndTime.plusHours(1)))
-                .sorted(Comparator.comparing(s -> s.departureTime))
-                .collect(Collectors.toList());
+    private List<TrainSchedule> findAvailableTrains(Station from, Station to, LocalTime searchTime) {
+        LocalTime searchStartTime = searchTime.minusMinutes(10);
+        LocalTime searchEndTime = searchTime.plusHours(1);
 
-            for (TrainSchedule first : firstLeg) {
-                List<TrainSchedule> secondLeg = schedules.stream()
-                    .filter(s -> s.from == intermediate && s.to == end)
-                    .filter(s -> {
-                        // Ensure minimum 5-minute buffer between trains
-                        LocalTime earliestDeparture = first.arrivalTime.plusMinutes(5);
-                        return s.departureTime.isAfter(earliestDeparture) &&
-                               s.departureTime.isBefore(searchTime.plusHours(1));
-                    })
-                    .sorted(Comparator.comparing(s -> s.departureTime))
-                    .collect(Collectors.toList());
+        return schedules.stream()
+            .filter(s -> s.from == from && s.to == to)
+            .filter(s -> !s.departureTime.isBefore(searchStartTime))
+            .filter(s -> s.departureTime.isBefore(searchEndTime))
+            .filter(s -> currentSegmentIndex == 0 || 
+                Duration.between(selectedTrains.get(selectedTrains.size() - 1).arrivalTime, 
+                    s.departureTime).toMinutes() >= 5)
+            .sorted(Comparator.comparing(s -> s.departureTime))
+            .collect(Collectors.toList());
+    }
 
-                if (!secondLeg.isEmpty()) {
-                    routes.add(Arrays.asList(first, secondLeg.get(0)));
-                }
+    private void displayTrainOptions(List<TrainSchedule> trains) {
+        selectionPanel.removeAll();
+        
+        if (trains.isEmpty()) {
+            JOptionPane.showMessageDialog(this, 
+                "No available trains found for this segment. Please try a different time.");
+            resetBooking();
+            return;
+        }
+
+        ButtonGroup buttonGroup = new ButtonGroup();
+        
+        JLabel headerLabel = new JLabel(String.format("Select train from %s to %s:",
+            shortestPath.get(currentSegmentIndex),
+            shortestPath.get(currentSegmentIndex + 1)));
+        headerLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        selectionPanel.add(headerLabel);
+        selectionPanel.add(Box.createVerticalStrut(10));
+
+        for (TrainSchedule train : trains) {
+            JRadioButton option = new JRadioButton(String.format(
+                "Departure: %s - Arrival: %s (Journey time: %d minutes)",
+                train.departureTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                train.arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                Duration.between(train.departureTime, train.arrivalTime).toMinutes()
+            ));
+            option.setActionCommand(trains.indexOf(train) + "");
+            buttonGroup.add(option);
+            option.setAlignmentX(Component.LEFT_ALIGNMENT);
+            selectionPanel.add(option);
+        }
+
+        nextButton.setEnabled(true);
+        selectionPanel.revalidate();
+        selectionPanel.repaint();
+        
+        // Store trains for selection
+        selectionPanel.putClientProperty("availableTrains", trains);
+        selectionPanel.putClientProperty("buttonGroup", buttonGroup);
+    }
+
+    private void selectTrainAndContinue() {
+        ButtonGroup buttonGroup = (ButtonGroup) selectionPanel.getClientProperty("buttonGroup");
+        if (buttonGroup.getSelection() == null) {
+            JOptionPane.showMessageDialog(this, "Please select a train to continue.");
+            return;
+        }
+
+        List<TrainSchedule> trains = (List<TrainSchedule>) selectionPanel.getClientProperty("availableTrains");
+        int selectedIndex = Integer.parseInt(buttonGroup.getSelection().getActionCommand());
+        TrainSchedule selectedTrain = trains.get(selectedIndex);
+        
+        selectedTrains.add(selectedTrain);
+        currentSegmentIndex++;
+        
+        updateJourneyInfo();
+        showTrainOptions();
+    }
+
+    private void updateJourneyInfo() {
+        StringBuilder info = new StringBuilder();
+        info.append(String.format("Trip from %s to %s\n", 
+            shortestPath.get(0), 
+            shortestPath.get(shortestPath.size() - 1)));
+        for (int i = 0; i < 20; i++) {
+            info.append("-");
+        }
+        info.append("\n");
+
+        for (TrainSchedule train : selectedTrains) {
+            info.append(String.format("%s to %s : Start at %s - Stops at %s\n",
+                train.from.name,
+                train.to.name,
+                train.departureTime.format(DateTimeFormatter.ofPattern("HH:mm")),
+                train.arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm"))));
+        }
+
+        if (!selectedTrains.isEmpty()) {
+            LocalTime startTime = selectedTrains.get(0).departureTime;
+            LocalTime endTime = selectedTrains.get(selectedTrains.size() - 1).arrivalTime;
+            long totalMinutes = Duration.between(startTime, endTime).toMinutes();
+            info.append(String.format("\nTotal time = %d minutes", totalMinutes));
+        }
+
+        resultArea.setText(info.toString());
+    }
+
+    private void showFinalItinerary() {
+        nextButton.setEnabled(false);
+        selectionPanel.removeAll();
+        
+        JLabel finalLabel = new JLabel("Journey Planning Complete!");
+        finalLabel.setFont(new Font(finalLabel.getFont().getName(), Font.BOLD, 14));
+        finalLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        selectionPanel.add(finalLabel);
+        
+        JButton newBookingButton = new JButton("Make New Booking");
+        newBookingButton.addActionListener(e -> resetBooking());
+        newBookingButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+        selectionPanel.add(Box.createVerticalStrut(10));
+        selectionPanel.add(newBookingButton);
+        
+        selectionPanel.revalidate();
+        selectionPanel.repaint();
+    }
+
+    private void resetBooking() {
+        currentSegmentIndex = 0;
+        selectedTrains.clear();
+        nextButton.setEnabled(false);
+        startOverButton.setEnabled(false);
+        selectionPanel.removeAll();
+        resultArea.setText("");
+        fromStation.setSelectedIndex(0);
+        toStation.setSelectedIndex(0);
+        timeSpinner.setValue(new Date());
+        
+        selectionPanel.revalidate();
+        selectionPanel.repaint();
+    }
+    
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-        }
+            new MetroBookingGUI().setVisible(true);
+        });
     }
-
-    return routes;
 }
-
-private void displayRoutes(List<List<TrainSchedule>> routes) {
-    currentRoutes = routes;
-    if (routes.isEmpty()) {
-        resultArea.setText("No trains available for the selected route and time.");
-        routesPanel.removeAll();
-        routesPanel.revalidate();
-        routesPanel.repaint();
-        confirmButton.setEnabled(false);
-        return;
-    }
-
-    routesPanel.removeAll();
-    routeButtonGroup = new ButtonGroup();
-    routesPanel.setLayout(new BoxLayout(routesPanel, BoxLayout.Y_AXIS));
-
-    StringBuilder result = new StringBuilder();
-    result.append("Available Routes:\n");
-    result.append("----------------\n\n");
-
-    for (int i = 0; i < routes.size(); i++) {
-        List<TrainSchedule> route = routes.get(i);
-        
-        // Create radio button for route selection
-        JRadioButton routeButton = new JRadioButton("Select Route " + (i + 1));
-        routeButton.setActionCommand(String.valueOf(i));
-        routeButtonGroup.add(routeButton);
-        routesPanel.add(routeButton);
-        
-        StringBuilder routeDetails = new StringBuilder();
-        routeDetails.append("Route ").append(i + 1).append(":\n");
-        
-        for (int j = 0; j < route.size(); j++) {
-            TrainSchedule schedule = route.get(j);
-            routeDetails.append("Train ").append(j + 1).append(": ")
-                      .append(schedule.from.name)
-                      .append(" to ")
-                      .append(schedule.to.name)
-                      .append("\n  Departure: ")
-                      .append(schedule.departureTime.format(DateTimeFormatter.ofPattern("HH:mm")))
-                      .append("hrs\n  Arrival: ")
-                      .append(schedule.arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm")))
-                      .append("hrs\n");
-            
-            if (j < route.size() - 1) {
-                TrainSchedule nextSchedule = route.get(j + 1);
-                long waitingTime = Duration.between(schedule.arrivalTime, nextSchedule.departureTime).toMinutes();
-                routeDetails.append("  Connection wait time: ").append(waitingTime).append(" minutes\n");
-            }
-        }
-
-        LocalTime startTime = route.get(0).departureTime;
-        LocalTime endTime = route.get(route.size() - 1).arrivalTime;
-        long totalMinutes = Duration.between(startTime, endTime).toMinutes();
-        routeDetails.append("Total journey time = ").append(totalMinutes).append(" minutes\n\n");
-
-        // Add route details in a bordered panel
-        JTextArea routeArea = new JTextArea(routeDetails.toString());
-        routeArea.setEditable(false);
-        routeArea.setBackground(null);
-        routeArea.setBorder(BorderFactory.createEmptyBorder(0, 20, 10, 0));
-        routesPanel.add(routeArea);
-    }
-
-    routesPanel.add(Box.createVerticalStrut(10));
-    
-    result.append("Please note:\n");
-    result.append("- All trains shown depart within 10 minutes before/after your requested time\n");
-    result.append("- Each connection has a minimum 5-minute buffer time\n");
-    result.append("- Only trains departing within the next hour are shown\n");
-    result.append("\nPlease select a route and click 'Confirm Booking' to proceed.");
-
-    resultArea.setText(result.toString());
-    confirmButton.setEnabled(true);
-    
-    routesPanel.revalidate();
-    routesPanel.repaint();
-}
-
-private void confirmBooking() {
-    if (routeButtonGroup.getSelection() == null) {
-        JOptionPane.showMessageDialog(this,
-            "Please select a route first",
-            "No Route Selected",
-            JOptionPane.WARNING_MESSAGE);
-        return;
-    }
-
-    int selectedRoute = Integer.parseInt(routeButtonGroup.getSelection().getActionCommand());
-    List<TrainSchedule> selected = currentRoutes.get(selectedRoute);
-
-    StringBuilder confirmation = new StringBuilder();
-    confirmation.append("Booking Confirmed!\n\n");
-    confirmation.append("Your Itinerary:\n");
-    confirmation.append("---------------\n");
-
-    for (int i = 0; i < selected.size(); i++) {
-        TrainSchedule schedule = selected.get(i);
-        confirmation.append("Train ").append(i + 1).append(":\n");
-        confirmation.append("From: ").append(schedule.from.name)
-                   .append(" at ").append(schedule.departureTime.format(DateTimeFormatter.ofPattern("HH:mm")))
-                   .append("hrs\n");
-        confirmation.append("To: ").append(schedule.to.name)
-                   .append(" at ").append(schedule.arrivalTime.format(DateTimeFormatter.ofPattern("HH:mm")))
-                   .append("hrs\n\n");
-    }
-
-    confirmation.append("Total journey time: ")
-                .append(Duration.between(
-                    selected.get(0).departureTime,
-                    selected.get(selected.size() - 1).arrivalTime).toMinutes())
-                .append(" minutes\n\n");
-    confirmation.append("Please arrive at least 10 minutes before departure time.\n");
-    confirmation.append("Have a pleasant journey!");
-
-    // Show confirmation dialog
-    JOptionPane.showMessageDialog(this,
-        confirmation.toString(),
-        "Booking Confirmation",
-        JOptionPane.INFORMATION_MESSAGE);
-
-    // Reset the form for new booking
-    fromStation.setSelectedIndex(0);
-    toStation.setSelectedIndex(0);
-    timeSpinner.setValue(new Date());
-    routeButtonGroup.clearSelection();
-    resultArea.setText("");
-    routesPanel.removeAll();
-    routesPanel.revalidate();
-    routesPanel.repaint();
-    confirmButton.setEnabled(false);
-}
-
-}
-
